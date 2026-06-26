@@ -137,4 +137,4 @@ mini-harness/
 
 ---
 
-*Powered by 谢俊杰 | AI Agent 学习路线 · 能统筹阶段*
+*mini-harness — Agent 运行时六大组件 | MIT License*
