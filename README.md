@@ -131,4 +131,4 @@ mini-harness/
 
 ---
 
-*mini-harness — Agent 运行时六大组件 | MIT License*
+*mini-harness — Agent 运行时六大组件*
