@@ -1,5 +1,8 @@
-# mini-harness — 从零搭建的 Agent 运行时
-# 核心依赖：Python 3.10+ 标准库
+# mini-harness — Agent 运行时（python 3.10+）
+# 核心依赖：Python 标准库
 # 可选依赖：tiktoken（精确 token 计数，无则用字符估算）
 
+# 真实 LLM 集成
+openai>=1.0.0
+python-dotenv>=1.0.0
 tiktoken>=0.5.0

@@ -401,7 +401,7 @@ class AgentHarness:
 
         # 初始化 Orchestrator 和 Synthesizer
         if self._orchestrator is None:
-            self._synthesizer = ResultSynthesizer(llm_fn=self._llm_fn)
+            self._synthesizer = ResultSynthesizer(llm_fn=lambda prompt: self._llm_fn([], prompt))
             self._orchestrator = Orchestrator(
                 expert_registry=self.experts,
                 llm_fn=lambda msgs, prompt: self._llm_fn(msgs, prompt),
