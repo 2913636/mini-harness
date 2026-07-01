@@ -407,6 +407,8 @@ class AgentHarness:
                 llm_fn=lambda msgs, prompt: self._llm_fn(msgs, prompt),
                 synthesizer=self._synthesizer,
                 default_expert_llm=lambda task: self._llm_fn([], f"完成以下任务，直接给结果：{task}"),
+                compressor=self.compressor,
+                recovery=self.recovery,
             )
 
         # 记录用户消息
@@ -558,10 +560,14 @@ class AgentHarness:
         import json as _json
         import re
 
-        match = re.search(r'```(?:json)?\s*\n?\s*\{[^`]+\}\s*\n?\s*```', llm_output)
+        match = re.search(r'```(?:json)?\s*\n?\s*\{[^`]+?\}\s*\n?\s*```', llm_output)
         if match:
             try:
-                data = _json.loads(match.group(0).strip("`").strip())
+                raw = match.group(0).strip("`").strip()
+                # Remove optional "json" language tag prefix
+                if raw.lower().startswith("json"):
+                    raw = raw[4:].strip()
+                data = _json.loads(raw)
                 if "tool" in data:
                     return data["tool"], data.get("args", {})
                 if "name" in data:

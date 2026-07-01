@@ -129,6 +129,8 @@ class Tracer:
         token_used: int = 0,
         duration_ms: float = 0,
         error: str = "",
+        expert_id: str = "",
+        parent_step_id: str = "",
         **meta,
     ) -> TraceStep:
         """快速记录一条追踪"""
@@ -144,6 +146,8 @@ class Tracer:
             error=error,
             metadata=meta,
             timestamp=time.time(),
+            expert_id=expert_id,
+            parent_step_id=parent_step_id,
         )
         self._write(step)
         if self.verbose:

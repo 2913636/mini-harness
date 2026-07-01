@@ -6,7 +6,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 
 @dataclass
@@ -37,6 +37,26 @@ class Expert:
         }
 
 
+class MatchScorer(Protocol):
+    """可插拔的专家匹配评分器协议。
+
+    实现此协议即可接入自定义匹配策略（如向量语义匹配）。
+    """
+
+    def score(self, task_description: str, expert: Expert) -> float:
+        """
+        计算专家与任务的匹配度分数。
+
+        Args:
+            task_description: 任务描述文本
+            expert: 待评分的专家
+
+        Returns:
+            匹配分数（0.0 ~ 1.0），分数越高越匹配。返回 0 表示不匹配。
+        """
+        ...
+
+
 class ExpertRegistry:
     """
     专家注册表 —— 管理所有可用的专家 Agent。
@@ -45,7 +65,11 @@ class ExpertRegistry:
       - 注册/注销专家
       - 按领域/名称查找专家
       - 为编排者生成专家目录
-      - 任务-专家匹配度计算（基于领域和能力的文本匹配）
+      - 任务-专家匹配度计算（默认字符串匹配，支持可插拔 scorer）
+
+    自定义匹配策略：
+        registry = ExpertRegistry()
+        registry.set_match_scorer(my_vector_scorer)  # 注入 embedding 匹配器
 
     用法：
         registry = ExpertRegistry()
@@ -61,6 +85,7 @@ class ExpertRegistry:
 
     def __init__(self):
         self._experts: dict[str, Expert] = {}
+        self._match_scorer: Optional[MatchScorer] = None
 
     # ── 注册 / 注销 ─────────────────────
 
@@ -103,20 +128,44 @@ class ExpertRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._experts
 
+    # ── 可插拔匹配器 ────────────────────
+
+    def set_match_scorer(self, scorer: MatchScorer):
+        """
+        注入自定义匹配评分器（v2 扩展点）。
+
+        默认为字符串关键词匹配。注入 scorer 后，match() 将使用自定义逻辑。
+
+        Example:
+            class VectorScorer:
+                def score(self, task, expert) -> float:
+                    task_vec = embed(task)
+                    expert_vec = embed(expert.description)
+                    return cosine_similarity(task_vec, expert_vec)
+
+            registry.set_match_scorer(VectorScorer())
+        """
+        self._match_scorer = scorer
+
     # ── 匹配（文本相似度）───────────────
 
     def match(self, task_description: str) -> list[tuple[Expert, float]]:
         """
         根据任务描述匹配最合适的专家。
 
-        匹配策略：
+        匹配策略（默认）：
           1. 领域关键词匹配（domain 命中 +0.3/个）
           2. 能力关键词匹配（capability 命中 +0.2/个）
           3. 描述语义匹配（description 关键词命中 +0.1/个）
 
+        如果设置了自定义 scorer，则使用自定义评分逻辑。
+
         Returns:
             [(expert, score), ...] 按分数降序排列
         """
+        if self._match_scorer is not None:
+            return self._match_with_scorer(task_description)
+
         task_lower = task_description.lower()
         scored: list[tuple[Expert, float]] = []
 
@@ -142,6 +191,17 @@ class ExpertRegistry:
             if score > 0:
                 scored.append((expert, min(score, 1.0)))
 
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def _match_with_scorer(self, task_description: str) -> list[tuple[Expert, float]]:
+        """使用自定义 scorer 进行匹配"""
+        assert self._match_scorer is not None
+        scored: list[tuple[Expert, float]] = []
+        for expert in self._experts.values():
+            score = self._match_scorer.score(task_description, expert)
+            if score > 0:
+                scored.append((expert, min(score, 1.0)))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored
 

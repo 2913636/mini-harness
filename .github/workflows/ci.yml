@@ -33,6 +33,11 @@ jobs:
       - name: Check unused imports
         run: ruff check harness/ --select F401
 
+      - name: Security scan with bandit
+        run: |
+          pip install bandit
+          bandit -r harness/ -ll -x tests/
+
       - name: Type check with mypy
         run: |
           pip install mypy

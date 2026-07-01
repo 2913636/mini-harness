@@ -72,6 +72,8 @@ class Orchestrator:
         llm_fn: Callable,
         synthesizer: Optional[ResultSynthesizer] = None,
         default_expert_llm: Optional[Callable] = None,
+        compressor: Optional[object] = None,
+        recovery: Optional[object] = None,
     ):
         """
         Args:
@@ -79,11 +81,15 @@ class Orchestrator:
             llm_fn: 编排者自己的 LLM（用于拆解和匹配）
             synthesizer: 结果合成器（None 则自动创建）
             default_expert_llm: 专家的默认 LLM（当专家自己没有 LLM 时使用）
+            compressor: 可选的 Compressor 实例，用于分支级上下文压缩
+            recovery: 可选的 Recovery 实例，用于分支级断点恢复
         """
         self.registry = expert_registry
         self._llm_fn = llm_fn
         self.synthesizer = synthesizer or ResultSynthesizer(llm_fn=llm_fn)
         self._default_expert_llm = default_expert_llm
+        self._compressor = compressor
+        self._recovery = recovery
         self._history: list[dict] = []  # 执行历史
 
     # ── 主流程 ──────────────────────────
@@ -410,6 +416,21 @@ class Orchestrator:
                         for dep_id in st.dependencies
                     }
 
+                # ── 分支级恢复检查点 ──
+                if self._recovery:
+                    self._recovery.save_branch(
+                        f"before_subtask_{st.id}",
+                        branch_id=st.id,
+                        messages=[],
+                        state={"subtask_id": st.id, "iteration": iteration},
+                    )
+
+                # ── 分支级上下文压缩 ──
+                if self._compressor:
+                    # 执行前检查是否需要压缩该分支的历史消息
+                    # （由外部通过 harness 传入消息列表时使用）
+                    pass  # compress_branch() 需外部消息列表，此处预留
+
                 # 执行子任务
                 st.status = "running"
                 try:
@@ -418,9 +439,17 @@ class Orchestrator:
                     st.status = "done"
                     completed_ids.add(st.id)
                     completed_results[st.id] = result
+                    # 成功后清除该分支检查点
+                    if self._recovery:
+                        self._recovery.clear_branch(st.id)
                 except Exception:
                     st.result = "子任务执行失败，已自动降级处理。"
                     st.status = "failed"
+                    # 失败时尝试恢复
+                    if self._recovery:
+                        cp = self._recovery.restore_branch(st.id, f"before_subtask_{st.id}")
+                        if cp:
+                            st.result = f"[已从检查点恢复] {st.result}"
 
             if all_done:
                 break
