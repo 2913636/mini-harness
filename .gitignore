@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 *.db
 output/
+.env
+.env.*
+*.key
+*.pem
