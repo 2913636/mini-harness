@@ -26,12 +26,22 @@ class GateRule:
     reason: str = ""        # 为什么这么设（日志里用）
 
 
+@dataclass
+class AgentRule:
+    """Agent 间调用权限规则（v2 新增）"""
+    caller: str             # 谁发起调用："*" 表示所有 Agent
+    callee: str             # 被调用的 Agent（专家名），"*" 表示所有
+    policy: Policy          # 放行 / 拒绝 / 询问
+    reason: str = ""        # 为什么这么设
+
+
 # 默认安全策略：按工具分类自动判断
 DEFAULT_CATEGORY_POLICY = {
     "safe": Policy.ALLOW,      # 计算器、字符串操作 → 自动放行
     "network": Policy.ASK,     # 网络请求 → 询问用户
     "file": Policy.ASK,        # 文件读写 → 询问用户
     "system": Policy.DENY,     # 系统命令 → 默认拒绝
+    "agent": Policy.ALLOW,     # v2: Agent 间调用 → 默认放行（由 AgentRule 控制）
     "general": Policy.ASK,     # 未知分类 → 询问用户
 }
 
@@ -66,6 +76,7 @@ class PermissionGate:
         self._category_policy = dict(DEFAULT_CATEGORY_POLICY)
         self._confirm_callback = confirm_callback
         self._category_resolver: Optional[Callable] = None
+        self._agent_rules: dict[str, AgentRule] = {}  # v2: Agent 间调用规则
 
     # ── 规则管理 ────────────────────────
 
@@ -138,3 +149,63 @@ class PermissionGate:
     def list_rules(self) -> list[GateRule]:
         """列出所有规则（调试用）"""
         return list(self._rules.values())
+
+    # ── Agent 间调用权限（v2 新增）───────
+
+    def add_agent_rule(self, rule: AgentRule):
+        """添加 Agent 间调用权限规则"""
+        key = f"{rule.caller}->{rule.callee}"
+        self._agent_rules[key] = rule
+
+    def remove_agent_rule(self, caller: str, callee: str):
+        """移除 Agent 间调用权限规则"""
+        key = f"{caller}->{callee}"
+        self._agent_rules.pop(key, None)
+
+    def check_agent_call(self, caller: str, callee: str) -> Policy:
+        """
+        检查 caller 是否可以调用 callee（v2 新增）。
+
+        优先级：精确匹配 > 通配 caller > 通配 callee > 默认 ALLOW
+        """
+        # 精确匹配
+        key = f"{caller}->{callee}"
+        if key in self._agent_rules:
+            return self._agent_rules[key].policy
+
+        # 通配 caller
+        wild_key = f"*->{callee}"
+        if wild_key in self._agent_rules:
+            return self._agent_rules[wild_key].policy
+
+        # 通配 callee
+        wild_key = f"{caller}->*"
+        if wild_key in self._agent_rules:
+            return self._agent_rules[wild_key].policy
+
+        # 全通配
+        if "*->*" in self._agent_rules:
+            return self._agent_rules["*->*"].policy
+
+        return Policy.ALLOW  # 默认允许 Agent 间调用
+
+    def gate_agent_call(self, caller: str, callee: str) -> bool:
+        """
+        Agent 间调用权限检查的简化接口。
+        Returns: True（允许）/ False（拒绝）
+        """
+        policy = self.check_agent_call(caller, callee)
+        if policy == Policy.ALLOW:
+            return True
+        elif policy == Policy.DENY:
+            return False
+        else:  # ASK
+            if self._confirm_callback:
+                return self._confirm_callback(
+                    callee, f"Agent '{caller}' 想要调用 Agent '{callee}'，是否允许？"
+                )
+            return False
+
+    def list_agent_rules(self) -> list[AgentRule]:
+        """列出所有 Agent 间权限规则"""
+        return list(self._agent_rules.values())

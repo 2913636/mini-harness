@@ -18,6 +18,7 @@ class Checkpoint:
     state: dict                    # 自定义状态数据
     timestamp: float = 0.0
     metadata: dict = field(default_factory=dict)
+    branch_id: str = ""            # v2: 哪个分支的检查点
 
 
 class Recovery:
@@ -134,3 +135,45 @@ class Recovery:
     @property
     def checkpoint_count(self) -> int:
         return len(self._checkpoints)
+
+    # ── 分支级恢复（v2 新增）────────────
+
+    def save_branch(
+        self,
+        name: str,
+        branch_id: str,
+        messages: list,
+        state: dict | None = None,
+        **metadata,
+    ) -> Checkpoint:
+        """保存分支检查点（v2 新增）"""
+        cp = Checkpoint(
+            name=name,
+            messages_snapshot=list(messages),
+            state=dict(state or {}),
+            timestamp=time.time(),
+            metadata=metadata,
+            branch_id=branch_id,
+        )
+        self._checkpoints.append(cp)
+        while len(self._checkpoints) > self._max_checkpoints:
+            self._checkpoints.pop(0)
+        return cp
+
+    def restore_branch(self, branch_id: str, name: str = "") -> Checkpoint | None:
+        """恢复到指定分支最近的检查点（v2 新增）"""
+        branch_cps = [cp for cp in self._checkpoints if cp.branch_id == branch_id]
+        if not branch_cps:
+            return None
+        if name:
+            for cp in reversed(branch_cps):
+                if cp.name == name:
+                    self._recovery_count += 1
+                    return cp
+            return None
+        self._recovery_count += 1
+        return branch_cps[-1]
+
+    def clear_branch(self, branch_id: str):
+        """清除指定分支的所有检查点（v2 新增）"""
+        self._checkpoints = [cp for cp in self._checkpoints if cp.branch_id != branch_id]

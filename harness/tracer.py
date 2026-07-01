@@ -18,7 +18,7 @@ from typing import Optional
 class TraceStep:
     """一步操作的追踪记录"""
     step_id: str
-    step_type: str       # "llm_call" | "tool_call" | "gate_check" | "compress" | "recovery"
+    step_type: str       # "llm_call" | "tool_call" | "gate_check" | "compress" | "recovery" | "orchestrate" | "expert_call" | "synthesize" | "decompose"
     session_id: str = ""
     input_summary: str = ""      # 输入的摘要（不存完整内容，防日志爆炸）
     output_summary: str = ""     # 输出的摘要
@@ -27,6 +27,9 @@ class TraceStep:
     error: str = ""
     metadata: dict = field(default_factory=dict)
     timestamp: float = 0.0
+    # v2 多 Agent 新增
+    expert_id: str = ""          # 属于哪个专家
+    parent_step_id: str = ""     # 父步骤 ID（因果链）
 
 
 class Tracer:
@@ -65,10 +68,14 @@ class Tracer:
                 duration_ms REAL DEFAULT 0,
                 error TEXT DEFAULT '',
                 metadata_json TEXT DEFAULT '{}',
-                timestamp REAL
+                timestamp REAL,
+                expert_id TEXT DEFAULT '',
+                parent_step_id TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_trace_session ON traces(session_id);
             CREATE INDEX IF NOT EXISTS idx_trace_type ON traces(step_type);
+            CREATE INDEX IF NOT EXISTS idx_trace_expert ON traces(expert_id);
+            CREATE INDEX IF NOT EXISTS idx_trace_parent ON traces(parent_step_id);
         """)
         self._conn.commit()
 
@@ -145,14 +152,16 @@ class Tracer:
     def _write(self, step: TraceStep):
         self._conn.execute(
             """INSERT INTO traces(step_id, step_type, session_id, input_summary,
-               output_summary, token_used, duration_ms, error, metadata_json, timestamp)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+               output_summary, token_used, duration_ms, error, metadata_json, timestamp,
+               expert_id, parent_step_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 step.step_id, step.step_type, step.session_id,
                 step.input_summary[:500], step.output_summary[:500],
                 step.token_used, step.duration_ms, step.error,
                 json.dumps(step.metadata, ensure_ascii=False),
                 step.timestamp,
+                step.expert_id, step.parent_step_id,
             ),
         )
         self._conn.commit()
@@ -165,19 +174,25 @@ class Tracer:
             "gate_check": "[GATE]",
             "compress": "[COMPRESS]",
             "recovery": "[RECOVER]",
+            "orchestrate": "[ORCH]",
+            "expert_call": "[EXP]",
+            "synthesize": "[SYNTH]",
+            "decompose": "[DECOMP]",
         }
-        icon = icons.get(step.step_type, "⚡")
+        icon = icons.get(step.step_type, "[*]")
         status = " [ERR]" if step.error else ""
 
         parts = [
             f"{icon} [{step.step_type.upper()}]{status}",
         ]
+        if step.expert_id:
+            parts.append(f"expert={step.expert_id}")
         if step.token_used:
             parts.append(f"token={step.token_used}")
         if step.duration_ms:
             parts.append(f"{step.duration_ms:.0f}ms")
         if step.input_summary:
-            parts.append(f"→ {step.input_summary[:80]}")
+            parts.append(f"-> {step.input_summary[:80]}")
         if step.error:
             parts.append(f"err={step.error[:60]}")
 
@@ -235,6 +250,49 @@ class Tracer:
             "total_time_ms": total_time,
             "errors": errors,
         }
+
+    def query_by_expert(self, expert_id: str, limit: int = 50) -> list[dict]:
+        """按专家查询追踪记录（v2 新增）"""
+        rows = self._conn.execute(
+            "SELECT * FROM traces WHERE expert_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (expert_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_causal_chain(self, step_id: str) -> list[dict]:
+        """查询某个步骤的因果链（v2 新增）"""
+        chain = []
+        current = step_id
+        visited = set()
+        while current and current not in visited:
+            visited.add(current)
+            row = self._conn.execute(
+                "SELECT * FROM traces WHERE step_id = ?", (current,)
+            ).fetchone()
+            if row:
+                chain.append(dict(row))
+                current = row["parent_step_id"]
+            else:
+                break
+        return chain
+
+    def expert_stats(self, session_id: str = "") -> list[dict]:
+        """按专家统计性能（v2 新增）"""
+        cond = "WHERE session_id = ? AND expert_id != ''" if session_id else "WHERE expert_id != ''"
+        params = [session_id] if session_id else []
+
+        rows = self._conn.execute(
+            f"""SELECT expert_id,
+                       COUNT(*) as calls,
+                       SUM(token_used) as total_tokens,
+                       SUM(duration_ms) as total_ms,
+                       SUM(CASE WHEN error != '' THEN 1 ELSE 0 END) as errors
+                FROM traces {cond}
+                GROUP BY expert_id
+                ORDER BY calls DESC""",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self._conn.close()

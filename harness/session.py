@@ -14,11 +14,20 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Message:
-    """一条消息"""
-    role: str           # "user" | "assistant" | "system" | "tool"
+    """一条消息
+
+    v2 新增字段（多 Agent 支持）：
+      - parent_id: 父消息 ID（树形结构），None=根节点
+      - expert_id: 产生此消息的专家名称，空=编排者/用户
+      - branch_id: 执行分支 ID，同一子任务的消息共享
+    """
+    role: str           # "user" | "assistant" | "system" | "tool" | "orchestrator" | "expert"
     content: str
     timestamp: float = 0.0
     metadata: dict = field(default_factory=dict)
+    parent_id: int | None = None
+    expert_id: str = ""
+    branch_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -26,6 +35,9 @@ class Message:
             "content": self.content,
             "timestamp": self.timestamp or time.time(),
             "metadata": self.metadata,
+            "parent_id": self.parent_id,
+            "expert_id": self.expert_id,
+            "branch_id": self.branch_id,
         }
 
     @classmethod
@@ -35,6 +47,9 @@ class Message:
             content=d["content"],
             timestamp=d.get("timestamp", 0),
             metadata=d.get("metadata", {}),
+            parent_id=d.get("parent_id"),
+            expert_id=d.get("expert_id", ""),
+            branch_id=d.get("branch_id", ""),
         )
 
 
@@ -94,9 +109,14 @@ class SessionStore:
                 content TEXT NOT NULL,
                 timestamp REAL,
                 metadata_json TEXT DEFAULT '{}',
+                parent_id INTEGER,
+                expert_id TEXT DEFAULT '',
+                branch_id TEXT DEFAULT '',
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id);
+            CREATE INDEX IF NOT EXISTS idx_msg_branch ON messages(branch_id);
+            CREATE INDEX IF NOT EXISTS idx_msg_expert ON messages(expert_id);
         """)
         self._conn.commit()
 
@@ -149,8 +169,13 @@ class SessionStore:
         """追加一条消息"""
         now = time.time()
         self._conn.execute(
-            "INSERT INTO messages(session_id, role, content, timestamp, metadata_json) VALUES(?,?,?,?,?)",
-            (session_id, message.role, message.content, message.timestamp or now, json.dumps(message.metadata, ensure_ascii=False)),
+            "INSERT INTO messages(session_id, role, content, timestamp, metadata_json, parent_id, expert_id, branch_id) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                session_id, message.role, message.content,
+                message.timestamp or now,
+                json.dumps(message.metadata, ensure_ascii=False),
+                message.parent_id, message.expert_id, message.branch_id,
+            ),
         )
         self._conn.execute(
             "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
@@ -162,8 +187,13 @@ class SessionStore:
         now = time.time()
         for msg in messages:
             self._conn.execute(
-                "INSERT INTO messages(session_id, role, content, timestamp, metadata_json) VALUES(?,?,?,?,?)",
-                (session_id, msg.role, msg.content, msg.timestamp or now, json.dumps(msg.metadata, ensure_ascii=False)),
+                "INSERT INTO messages(session_id, role, content, timestamp, metadata_json, parent_id, expert_id, branch_id) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    session_id, msg.role, msg.content,
+                    msg.timestamp or now,
+                    json.dumps(msg.metadata, ensure_ascii=False),
+                    msg.parent_id, msg.expert_id, msg.branch_id,
+                ),
             )
         self._conn.execute(
             "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
@@ -182,9 +212,76 @@ class SessionStore:
                 content=r["content"],
                 timestamp=r["timestamp"],
                 metadata=json.loads(r["metadata_json"]),
+                parent_id=r["parent_id"],
+                expert_id=r["expert_id"],
+                branch_id=r["branch_id"],
             )
             for r in rows
         ]
+
+    def get_messages_by_branch(self, session_id: str, branch_id: str) -> list[Message]:
+        """按分支获取消息（v2 新增）"""
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? AND branch_id = ? ORDER BY id ASC",
+            (session_id, branch_id),
+        ).fetchall()
+        return [
+            Message(
+                role=r["role"],
+                content=r["content"],
+                timestamp=r["timestamp"],
+                metadata=json.loads(r["metadata_json"]),
+                parent_id=r["parent_id"],
+                expert_id=r["expert_id"],
+                branch_id=r["branch_id"],
+            )
+            for r in rows
+        ]
+
+    def get_messages_by_expert(self, session_id: str, expert_id: str) -> list[Message]:
+        """按专家获取消息（v2 新增）"""
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? AND expert_id = ? ORDER BY id ASC",
+            (session_id, expert_id),
+        ).fetchall()
+        return [
+            Message(
+                role=r["role"],
+                content=r["content"],
+                timestamp=r["timestamp"],
+                metadata=json.loads(r["metadata_json"]),
+                parent_id=r["parent_id"],
+                expert_id=r["expert_id"],
+                branch_id=r["branch_id"],
+            )
+            for r in rows
+        ]
+
+    def get_message_tree(self, session_id: str) -> dict:
+        """获取树形消息结构（v2 新增）
+        Returns:
+            {msg_id: {"msg": Message, "children": [child_ids]}}
+        """
+        msgs = self.get_messages(session_id)
+        tree: dict = {}
+        for m in msgs:
+            # Use metadata to get a stable id, or fallback to index
+            msg_id = m.metadata.get("msg_id", id(m))
+            tree[msg_id] = {"msg": m, "children": []}
+
+        # Build parent-child relationships
+        for m in msgs:
+            if m.parent_id is not None:
+                parent = m.parent_id
+                msg_id = m.metadata.get("msg_id", id(m))
+                # Find parent by checking metadata
+                for pid, node in tree.items():
+                    pmsg = node["msg"]
+                    if pmsg.metadata.get("msg_id") == parent:
+                        node["children"].append(msg_id)
+                        break
+
+        return tree
 
     def get_message_count(self, session_id: str) -> int:
         row = self._conn.execute(

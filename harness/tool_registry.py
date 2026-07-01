@@ -125,3 +125,27 @@ class ToolRegistry:
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools
+
+    # ── 专家桥接（v2 新增）──────────────
+
+    def register_expert_as_tool(self, expert_name: str, expert_fn: Callable, description: str = "") -> Tool:
+        """
+        将专家 Agent 作为工具注册（v2 新增）。
+
+        编排者可以通过工具调用机制来派发任务给专家。
+        这允许专家在 Tool Registry 和 Expert Registry 之间桥接。
+
+        Args:
+            expert_name: 专家名称
+            expert_fn: 专家执行函数: fn(task: str) -> str
+            description: 工具描述（默认自动生成）
+        """
+        desc = description or f"调用专家 '{expert_name}' 执行任务。输入：任务描述字符串。"
+        return self.register(
+            name=expert_name,
+            description=desc,
+            parameters={"task": {"type": "string", "description": "要执行的任务描述"}},
+            fn=expert_fn,
+            category="agent",
+            tags=["expert", expert_name],
+        )

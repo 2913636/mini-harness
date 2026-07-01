@@ -210,3 +210,53 @@ class Compressor:
     def set_summarize_fn(self, fn: Callable):
         """设置摘要函数"""
         self._summarize_fn = fn
+
+    # ── 分支级压缩（v2 新增）────────────
+
+    def compress_branch(
+        self,
+        messages: list,
+        branch_id: str,
+        strategy: str = "hybrid",
+    ) -> CompressResult:
+        """
+        按分支压缩消息（v2 多 Agent 支持）。
+
+        每个分支/专家有自己的上下文窗口。
+        过滤出该分支的消息，压缩后再合并回去。
+
+        Args:
+            messages: 全部消息
+            branch_id: 要压缩的分支 ID
+            strategy: 压缩策略
+
+        Returns:
+            CompressResult
+        """
+        # 分离：该分支的消息 vs 其他消息
+        branch_msgs = []
+        other_msgs = []
+        for m in messages:
+            bid = getattr(m, "branch_id", "")
+            if bid == branch_id:
+                branch_msgs.append(m)
+            else:
+                other_msgs.append(m)
+
+        # 只压缩该分支
+        branch_compressed = self.compress(branch_msgs, strategy=strategy)
+
+        # 合并结果
+        result_msgs = other_msgs + branch_compressed.messages
+
+        tokens_before = self.estimate_tokens_batch(messages)
+        tokens_after = self.estimate_tokens_batch(result_msgs)
+
+        return CompressResult(
+            messages=result_msgs,
+            original_count=len(messages),
+            compressed_count=len(result_msgs),
+            estimated_tokens_before=tokens_before,
+            estimated_tokens_after=tokens_after,
+            strategy=f"branch_{strategy}",
+        )
