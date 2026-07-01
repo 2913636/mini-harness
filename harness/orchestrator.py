@@ -324,7 +324,7 @@ class Orchestrator:
             缺失的领域/能力描述列表
         """
         gaps = []
-        all_expert_domains = set()
+        all_expert_domains: set[str] = set()
         for expert in self.registry.list_all():
             all_expert_domains.update(d.lower() for d in expert.domain)
 

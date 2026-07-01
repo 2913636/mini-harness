@@ -469,7 +469,7 @@ class AgentHarness:
         if gaps:
             gap_msg = Message(
                 role="system",
-                content=f"[能力缺口] 以下领域缺少对应专家，已用 LLM 通用能力兜底：\n" + "\n".join(f"  - {g}" for g in gaps),
+                content="[能力缺口] 以下领域缺少对应专家，已用 LLM 通用能力兜底：\n" + "\n".join(f"  - {g}" for g in gaps),
                 metadata={"type": "gap_warning"},
             )
             self.session_store.add_message(sid, gap_msg)
@@ -534,7 +534,7 @@ class AgentHarness:
         """脱敏 metadata 中的敏感键（递归处理嵌套 dict）"""
         if not metadata:
             return metadata
-        redacted = {}
+        redacted: dict = {}
         for k, v in metadata.items():
             if k in self._sensitive_keys:
                 redacted[k] = "[REDACTED]"

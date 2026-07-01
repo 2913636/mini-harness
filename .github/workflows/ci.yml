@@ -32,7 +32,7 @@ jobs:
 
       - name: Type check with mypy
         run: |
-          pip install mypy types-tiktoken
+          pip install mypy
           mypy harness/ --ignore-missing-imports --no-strict-optional
 
       - name: Run tests

@@ -170,31 +170,30 @@ class ResultSynthesizer:
     ) -> str:
         """基于规则的合成（无 LLM 时使用）"""
         lines = [
-            f"# 最终报告",
-            f"",
+            "# 最终报告",
+            "",
             f"> 原始任务：{task}",
         ]
         if priorities:
             lines.append(f"> 用户关注重点：{', '.join(priorities)}")
         lines.append(f"> 参与专家：{len(sources)} 个")
-        lines.append(f"")
-        lines.append(f"---")
-        lines.append(f"")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
 
         for i, s in enumerate(sources, 1):
             lines.append(f"## {i}. {s.subtask or '专家分析'}")
             lines.append(f"> 来源：**{s.source_expert}**")
             if s.confidence:
                 lines.append(f"> 置信度：{s.confidence}")
-            lines.append(f"")
+            lines.append("")
             lines.append(s.content.strip())
-            lines.append(f"")
-            lines.append(f"---")
-            lines.append(f"")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
 
-        lines.append(f"## 综合结论")
-        lines.append(f"")
-        experts_list = ", ".join(sorted(set(s.source_expert for s in sources)))
+        lines.append("## 综合结论")
+        lines.append("")
         lines.append(f"以上分析由 {', '.join(set(s.source_expert for s in sources))} 共同完成。")
         if priorities:
             lines.append(f"报告已按用户指定的重点（{', '.join(priorities)}）调整权重。")
@@ -209,22 +208,22 @@ class ResultSynthesizer:
     ) -> str:
         """用 LLM 智能合成"""
         prompt_parts = [
-            f"请根据以下多位专家的分析结果，生成一份综合性报告。",
-            f"",
+            "请根据以下多位专家的分析结果，生成一份综合性报告。",
+            "",
             f"原始任务：{task}",
         ]
         if priorities:
             prompt_parts.append(f"用户特别关注：{', '.join(priorities)}，请在这些方面加大权重。")
-        prompt_parts.append(f"")
-        prompt_parts.append(f"## 专家分析结果：")
+        prompt_parts.append("")
+        prompt_parts.append("## 专家分析结果：")
         for i, s in enumerate(sources, 1):
             prompt_parts.append(f"### 专家 {i}：{s.source_expert}（子任务：{s.subtask}）")
             prompt_parts.append(s.content[:2000])  # 限制长度
-            prompt_parts.append(f"")
-        prompt_parts.append(f"## 要求：")
-        prompt_parts.append(f"1. 合并重复观点，每个结论只出现一次")
-        prompt_parts.append(f"2. 每段结论标注来源：[来源: 专家名]")
-        prompt_parts.append(f"3. 用户强调的重点结论放在前面")
+            prompt_parts.append("")
+        prompt_parts.append("## 要求：")
+        prompt_parts.append("1. 合并重复观点，每个结论只出现一次")
+        prompt_parts.append("2. 每段结论标注来源：[来源: 专家名]")
+        prompt_parts.append("3. 用户强调的重点结论放在前面")
 
         prompt = "\n".join(prompt_parts)
 
