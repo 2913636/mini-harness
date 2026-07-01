@@ -5,7 +5,7 @@
 这些函数被注册到 ExpertRegistry 中，由 Orchestrator 调度执行。
 
 用法:
-    from expert_functions import create_code_reviewer, create_security_expert, create_test_writer
+    from expert_functions import create_code_reviewer
     from llm_client import DeepSeekClient
 
     client = DeepSeekClient()
@@ -13,15 +13,24 @@
     result = reviewer("审查这段代码的安全性")
 """
 
+from collections.abc import Callable
 from llm_client import DeepSeekClient
 
+# 进度回调类型: fn(status: str)  — status 可选: "thinking" | "streaming" | "done"
+ProgressCallback = Callable | None
 
-def create_code_reviewer(client: DeepSeekClient):
-    """
-    创建代码审查专家。
 
-    审查维度：可读性、正确性、性能、边界情况、设计模式。
-    """
+def _progress(cb: ProgressCallback, msg: str):
+    """安全地调用进度回调"""
+    if cb:
+        try:
+            cb(msg)
+        except Exception:
+            pass
+
+
+def create_code_reviewer(client: DeepSeekClient, on_progress: ProgressCallback = None):
+    """创建代码审查专家。审查维度：可读性、正确性、性能、边界情况、设计模式。"""
     SYSTEM = """你是一位资深代码审查专家（10 年+ 经验）。
 
 审查维度（每个维度打分 1-5 并给出具体建议）：
@@ -51,20 +60,23 @@ def create_code_reviewer(client: DeepSeekClient):
 如果用户没有提供具体代码，就分析用户描述中提到的技术方案或架构。"""
 
     def code_reviewer(task: str, context: dict | None = None) -> str:
+        _progress(on_progress, "thinking")
         prompt = task
         if context:
             prompt = f"任务：{task}\n\n上下文信息：{context}"
-        return client.chat(prompt, system_prompt=SYSTEM)
+
+        def on_chunk(text: str):
+            _progress(on_progress, text)
+
+        result = client.chat(prompt, system_prompt=SYSTEM, on_chunk=on_chunk)
+        _progress(on_progress, "done")
+        return result
 
     return code_reviewer
 
 
-def create_security_expert(client: DeepSeekClient):
-    """
-    创建安全分析专家。
-
-    扫描维度：注入攻击、权限控制、敏感信息泄露、依赖安全、加密实践。
-    """
+def create_security_expert(client: DeepSeekClient, on_progress: ProgressCallback = None):
+    """创建安全分析专家。扫描维度：注入攻击、权限控制、敏感信息泄露、依赖安全、加密实践。"""
     SYSTEM = """你是一位资深应用安全专家（CISSP 认证）。
 
 安全审查维度：
@@ -92,21 +104,23 @@ def create_security_expert(client: DeepSeekClient):
 如果用户没有提供具体代码，就基于通用的安全最佳实践进行分析和建议。"""
 
     def security_expert(task: str, context: dict | None = None) -> str:
+        _progress(on_progress, "thinking")
         prompt = task
         if context:
-            # 如果有代码审查的结果，作为参考
             prompt = f"任务：{task}\n\n参考信息：{context}"
-        return client.chat(prompt, system_prompt=SYSTEM)
+
+        def on_chunk(text: str):
+            _progress(on_progress, text)
+
+        result = client.chat(prompt, system_prompt=SYSTEM, on_chunk=on_chunk)
+        _progress(on_progress, "done")
+        return result
 
     return security_expert
 
 
-def create_test_writer(client: DeepSeekClient):
-    """
-    创建测试编写专家。
-
-    基于代码逻辑和审查结果，生成针对性的测试用例。
-    """
+def create_test_writer(client: DeepSeekClient, on_progress: ProgressCallback = None):
+    """创建测试编写专家。基于代码逻辑和审查结果，生成针对性的测试用例。"""
     SYSTEM = """你是一位资深测试工程师（ISTQB 认证）。
 
 测试用例设计覆盖：
@@ -125,11 +139,7 @@ import pytest
 
 def test_normal_case():
     \"\"\"正常路径：...\"\"\"
-    # Arrange
-    ...
-    # Act
-    ...
-    # Assert
+    # Arrange / Act / Assert
     ...
 
 def test_edge_case():
@@ -142,27 +152,29 @@ def test_error_case():
 ```
 
 ### 覆盖率分析
-- 语句覆盖: XX%
-- 分支覆盖: XX%
+- 语句覆盖: XX% / 分支覆盖: XX%
 - 建议补充的测试场景
 
-如果用户没有提供具体代码，就输出测试设计思路和通用的测试用例模板。"""
+如果用户没有提供具体代码，就输出测试设计思路和通用模板。"""
 
     def test_writer(task: str, context: dict | None = None) -> str:
+        _progress(on_progress, "thinking")
         prompt = task
         if context:
             prompt = f"任务：{task}\n\n前置分析结果：{context}"
-        return client.chat(prompt, system_prompt=SYSTEM)
+
+        def on_chunk(text: str):
+            _progress(on_progress, text)
+
+        result = client.chat(prompt, system_prompt=SYSTEM, on_chunk=on_chunk)
+        _progress(on_progress, "done")
+        return result
 
     return test_writer
 
 
-def create_doc_writer(client: DeepSeekClient):
-    """
-    创建文档生成专家。
-
-    基于代码和分析结果，生成技术文档或综合报告。
-    """
+def create_doc_writer(client: DeepSeekClient, on_progress: ProgressCallback = None):
+    """创建文档生成专家。基于代码和分析结果，生成技术文档或综合报告。"""
     SYSTEM = """你是一位资深技术文档工程师。
 
 文档编写原则：
@@ -174,9 +186,16 @@ def create_doc_writer(client: DeepSeekClient):
 输出格式：Markdown，包含代码块、表格、流程图（mermaid 如果适用）。"""
 
     def doc_writer(task: str, context: dict | None = None) -> str:
+        _progress(on_progress, "thinking")
         prompt = task
         if context:
             prompt = f"任务：{task}\n\n参考材料：{context}"
-        return client.chat(prompt, system_prompt=SYSTEM)
+
+        def on_chunk(text: str):
+            _progress(on_progress, text)
+
+        result = client.chat(prompt, system_prompt=SYSTEM, on_chunk=on_chunk)
+        _progress(on_progress, "done")
+        return result
 
     return doc_writer

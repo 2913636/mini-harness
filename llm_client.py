@@ -63,6 +63,7 @@ class DeepSeekClient:
         prompt: str,
         system_prompt: str = "",
         messages: Optional[list] = None,
+        on_chunk: Optional[callable] = None,
     ) -> str:
         """
         发送 chat completion 请求。
@@ -71,6 +72,8 @@ class DeepSeekClient:
             prompt: 用户提示词（必填）
             system_prompt: 系统角色设定
             messages: 追加的历史消息列表 [{"role": "...", "content": "..."}]
+            on_chunk: 流式回调 fn(text: str)，每收到一个 token 就调用。
+                      提供此参数时使用流式模式，边生成边返回。
 
         Returns:
             LLM 的文本回复
@@ -84,6 +87,27 @@ class DeepSeekClient:
             api_messages.extend(messages)
         api_messages.append({"role": "user", "content": prompt})
 
+        # 流式模式
+        if on_chunk:
+            full = []
+            try:
+                stream = client.chat.completions.create(
+                    model=self.model,
+                    messages=api_messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    stream=True,
+                )
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        text = chunk.choices[0].delta.content
+                        full.append(text)
+                        on_chunk(text)
+                return "".join(full)
+            except Exception as e:
+                raise RuntimeError(f"DeepSeek API 流式调用失败: {e}")
+
+        # 非流式模式
         try:
             response = client.chat.completions.create(
                 model=self.model,
