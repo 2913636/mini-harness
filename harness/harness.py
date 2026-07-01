@@ -70,7 +70,13 @@ class AgentHarness:
         max_tokens: int = 8000,
         keep_recent: int = 6,
         verbose: bool = True,
+        sensitive_metadata_keys: list | None = None,
     ):
+        """
+        Args:
+            sensitive_metadata_keys: 需要在存储前从 metadata 中脱敏的键名列表。
+                                     默认脱敏: ["args", "api_key", "token", "secret", "password"]
+        """
         # ── 六大组件（v1 兼容）─────────
         self.tools = ToolRegistry()
         self.gate = PermissionGate()
@@ -94,6 +100,11 @@ class AgentHarness:
         # ── 当前会话 ─────────────────
         self._session: Optional[Session] = None
         self._verbose = verbose
+
+        # ── 元数据脱敏配置 ───────────
+        self._sensitive_keys: set = set(
+            sensitive_metadata_keys or ["args", "api_key", "token", "secret", "password"]
+        )
 
         self._log("[INIT] AgentHarness v2 初始化完成（多 Agent 就绪）")
 
@@ -322,8 +333,13 @@ class AgentHarness:
                     step.error = tool_result
                 else:
                     try:
-                        tool_result = str(tool.fn(**tool_args))
+                        # 安全校验：根据注册的 schema 验证参数
+                        validated_args = self._validate_tool_args(tool, tool_args)
+                        tool_result = str(tool.fn(**validated_args))
                         step.output_summary = tool_result[:200]
+                    except ValueError as e:
+                        tool_result = f"参数校验失败：{e}"
+                        step.error = tool_result
                     except Exception as e:
                         tool_result = f"工具执行错误：{e}"
                         step.error = tool_result
@@ -331,7 +347,7 @@ class AgentHarness:
             tool_msg = Message(
                 role="tool",
                 content=tool_result,
-                metadata={"tool_name": tool_name, "args": tool_args},
+                metadata=self._redact_metadata({"tool_name": tool_name, "args": tool_args}),
             )
             self.session_store.add_message(sid, tool_msg)
             self._session.messages.append(tool_msg)
@@ -465,8 +481,70 @@ class AgentHarness:
         return result
 
     # ═══════════════════════════════════════════
-    # 工具调用解析
+    # 工具调用解析 & 安全校验
     # ═══════════════════════════════════════════
+
+    def _validate_tool_args(self, tool: Tool, tool_args: dict) -> dict:
+        """
+        根据注册的工具参数 schema 校验工具参数（防止 LLM 提示注入伪造调用）。
+
+        校验项：
+          - 未知参数 → 丢弃（不在参数 schema 中的键）
+          - 类型不匹配 → 尝试转换，失败则丢弃该参数
+          - 必填参数缺失 → 抛出 ValueError
+        """
+        if not tool.parameters:
+            return dict(tool_args)
+
+        validated: dict = {}
+        for param_name, param_schema in tool.parameters.items():
+            if param_name in tool_args:
+                value = tool_args[param_name]
+                expected_type = param_schema.get("type", "string")
+                # 类型校验与转换
+                if expected_type == "string" and not isinstance(value, str):
+                    validated[param_name] = str(value)
+                elif expected_type == "number" and not isinstance(value, (int, float)):
+                    try:
+                        validated[param_name] = float(value)
+                    except (ValueError, TypeError):
+                        continue  # 无法转换，丢弃
+                elif expected_type == "integer" and not isinstance(value, int):
+                    try:
+                        validated[param_name] = int(value)
+                    except (ValueError, TypeError):
+                        continue
+                elif expected_type == "boolean" and not isinstance(value, bool):
+                    if isinstance(value, str):
+                        validated[param_name] = value.lower() in ("true", "1", "yes")
+                    else:
+                        validated[param_name] = bool(value)
+                else:
+                    validated[param_name] = value
+
+        # 检查必填参数
+        required = {k for k, v in tool.parameters.items() if v.get("required", True)}
+        missing = required - set(validated.keys())
+        if missing:
+            raise ValueError(f"工具 '{tool.name}' 缺少必填参数: {', '.join(sorted(missing))}")
+
+        return validated
+
+    def _redact_metadata(self, metadata: dict) -> dict:
+        """脱敏 metadata 中的敏感键（递归处理嵌套 dict）"""
+        if not metadata:
+            return metadata
+        redacted = {}
+        for k, v in metadata.items():
+            if k in self._sensitive_keys:
+                redacted[k] = "[REDACTED]"
+            elif isinstance(v, dict):
+                redacted[k] = self._redact_metadata(v)
+            else:
+                redacted[k] = v
+        return redacted
+
+
 
     def _parse_tool_call(self, llm_output: str) -> Optional[tuple[str, dict]]:
         """

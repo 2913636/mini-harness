@@ -237,7 +237,10 @@ class Compressor:
         branch_msgs = []
         other_msgs = []
         for m in messages:
-            bid = getattr(m, "branch_id", "")
+            if not hasattr(m, "branch_id"):
+                other_msgs.append(m)
+                continue
+            bid = m.branch_id
             if bid == branch_id:
                 branch_msgs.append(m)
             else:

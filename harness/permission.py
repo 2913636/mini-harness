@@ -187,7 +187,7 @@ class PermissionGate:
         if "*->*" in self._agent_rules:
             return self._agent_rules["*->*"].policy
 
-        return Policy.ALLOW  # 默认允许 Agent 间调用
+        return Policy.DENY  # 默认拒绝 Agent 间调用，需显式配置权限
 
     def gate_agent_call(self, caller: str, callee: str) -> bool:
         """

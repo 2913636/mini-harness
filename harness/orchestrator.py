@@ -146,6 +146,58 @@ class Orchestrator:
 
     # ── 步骤 1：拆解 ────────────────────
 
+    # 合法子任务 ID 和优先级的白名单
+    _VALID_ID_PATTERN = None  # lazily compiled
+    _VALID_PRIORITIES = {"P0", "P1", "P2"}
+
+    @classmethod
+    def _validate_subtask(cls, item: dict, seen_ids: set) -> SubTask | None:
+        """验证并清洗 LLM 返回的子任务数据，非法数据返回 None"""
+        import re
+        if cls._VALID_ID_PATTERN is None:
+            cls._VALID_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,32}$')
+
+        raw_id = str(item.get("id", ""))
+        # 校验 ID 格式：仅允许字母数字、下划线、连字符，最长 32 字符
+        if not cls._VALID_ID_PATTERN.match(raw_id):
+            return None
+        if raw_id in seen_ids:
+            return None
+
+        desc = str(item.get("description", "")).strip()
+        # 描述不能为空，且限制长度防止注入
+        if not desc or len(desc) > 2000:
+            return None
+
+        # 领域白名单校验（只保留已知领域）
+        known_domains = {
+            "code", "security", "doc", "data", "search", "testing",
+            "quality", "general", "devops", "frontend", "backend",
+        }
+        raw_domains = item.get("required_domains", [])
+        if not isinstance(raw_domains, list):
+            raw_domains = []
+        domains = [str(d).lower() for d in raw_domains if str(d).lower() in known_domains]
+
+        # 依赖 ID 校验
+        raw_deps = item.get("dependencies", [])
+        if not isinstance(raw_deps, list):
+            raw_deps = []
+        deps = [str(d) for d in raw_deps if cls._VALID_ID_PATTERN.match(str(d))]
+
+        priority = str(item.get("priority", "P0")).upper()
+        if priority not in cls._VALID_PRIORITIES:
+            priority = "P0"
+
+        seen_ids.add(raw_id)
+        return SubTask(
+            id=raw_id,
+            description=desc,
+            required_domains=domains,
+            dependencies=deps,
+            priority=priority,
+        )
+
     def decompose(self, task: str) -> list[SubTask]:
         """
         用 LLM 将用户任务拆解为子任务。
@@ -192,11 +244,18 @@ class Orchestrator:
         import re
         import json as _json
 
-        match = re.search(r'```(?:json)?\s*\n?\s*(\[.*?\])\s*\n?\s*```', response, re.DOTALL)
+        # 加固正则：先找代码块 JSON 数组，使用贪婪匹配避免嵌套括号截断
+        match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', response, re.DOTALL)
         if match:
-            raw = match.group(1)
+            raw = match.group(1).strip()
+            # 找到最外层的 JSON 数组
+            arr_match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if arr_match:
+                raw = arr_match.group(0)
+            else:
+                return self._rule_decompose(task)
         else:
-            # 尝试直接找 JSON 数组
+            # 尝试在全文直接找 JSON 数组
             match = re.search(r'\[.*\]', response, re.DOTALL)
             if match:
                 raw = match.group(0)
@@ -208,16 +267,18 @@ class Orchestrator:
         except _json.JSONDecodeError:
             return self._rule_decompose(task)
 
+        if not isinstance(items, list):
+            return self._rule_decompose(task)
+
+        # 使用验证器清洗数据
+        seen_ids: set = set()
         subtasks = []
         for item in items:
-            st = SubTask(
-                id=str(item.get("id", len(subtasks) + 1)),
-                description=item.get("description", ""),
-                required_domains=item.get("required_domains", []),
-                dependencies=[str(d) for d in item.get("dependencies", [])],
-                priority=item.get("priority", "P0"),
-            )
-            subtasks.append(st)
+            if not isinstance(item, dict):
+                continue
+            st = self._validate_subtask(item, seen_ids)
+            if st is not None:
+                subtasks.append(st)
 
         return subtasks if subtasks else self._rule_decompose(task)
 

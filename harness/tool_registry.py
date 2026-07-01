@@ -48,7 +48,7 @@ class ToolRegistry:
             name="calculator",
             description="执行数学计算，参数：expression(算式字符串)",
             parameters={"expression": {"type": "string", "description": "数学表达式"}},
-            fn=lambda expression: str(eval(expression)),
+            fn=lambda expression: str(__import__('ast').literal_eval(expression)),
             category="safe",
         )
         tool = registry.get("calculator")

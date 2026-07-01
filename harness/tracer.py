@@ -166,6 +166,28 @@ class Tracer:
         )
         self._conn.commit()
 
+    # 敏感数据模式：匹配这些模式的值将自动脱敏
+    _SENSITIVE_PATTERNS = [
+        "api_key", "apikey", "api_secret", "secret", "password",
+        "token", "credential", "private_key", "access_key",
+    ]
+
+    @classmethod
+    def _redact_sensitive(cls, text: str) -> str:
+        """对可能包含敏感数据的摘要文本进行脱敏"""
+        if not text:
+            return text
+        import re
+        for pattern in cls._SENSITIVE_PATTERNS:
+            # 匹配 key=value 或 "key": "value" 或 key: value 模式
+            text = re.sub(
+                rf'({pattern}\s*[=:]\s*)(\S+)',
+                r'\1[REDACTED]',
+                text,
+                flags=re.IGNORECASE,
+            )
+        return text
+
     def _print(self, step: TraceStep):
         """控制台输出格式"""
         icons = {
@@ -192,9 +214,9 @@ class Tracer:
         if step.duration_ms:
             parts.append(f"{step.duration_ms:.0f}ms")
         if step.input_summary:
-            parts.append(f"-> {step.input_summary[:80]}")
+            parts.append(f"-> {self._redact_sensitive(step.input_summary[:80])}")
         if step.error:
-            parts.append(f"err={step.error[:60]}")
+            parts.append(f"err={self._redact_sensitive(step.error[:60])}")
 
         print(" | ".join(parts))
 

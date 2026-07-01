@@ -204,8 +204,10 @@ class SessionStore:
         """获取会话消息（limit=0 表示全部）"""
         query = "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC"
         if limit > 0:
-            query += f" LIMIT {limit}"
-        rows = self._conn.execute(query, (session_id,)).fetchall()
+            query += " LIMIT ?"
+            rows = self._conn.execute(query, (session_id, limit)).fetchall()
+        else:
+            rows = self._conn.execute(query, (session_id,)).fetchall()
         return [
             Message(
                 role=r["role"],
