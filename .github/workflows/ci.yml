@@ -28,12 +28,15 @@ jobs:
           pip install -r requirements.txt
 
       - name: Lint with ruff
-        run: ruff check harness/ --ignore E501,F401
+        run: ruff check harness/ --ignore E501
+
+      - name: Check unused imports
+        run: ruff check harness/ --select F401
 
       - name: Type check with mypy
         run: |
           pip install mypy
-          mypy harness/ --ignore-missing-imports --no-strict-optional
+          mypy harness/ --ignore-missing-imports
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

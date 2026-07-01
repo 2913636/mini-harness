@@ -8,6 +8,7 @@
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -92,10 +93,12 @@ class SessionStore:
     def __init__(self, db_path: str = ":memory:"):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
         self._init_tables()
 
     def _init_tables(self):
         self._conn.executescript("""
+            PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 state_json TEXT DEFAULT '{}',
@@ -127,11 +130,12 @@ class SessionStore:
         import uuid
         sid = session_id or str(uuid.uuid4())[:8]
         now = time.time()
-        self._conn.execute(
-            "INSERT OR REPLACE INTO sessions(id, state_json, created_at, updated_at) VALUES(?, ?, ?, ?)",
-            (sid, "{}", now, now),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sessions(id, state_json, created_at, updated_at) VALUES(?, ?, ?, ?)",
+                (sid, "{}", now, now),
+            )
+            self._conn.commit()
         return Session(id=sid, created_at=now, updated_at=now)
 
     def get(self, session_id: str) -> Session | None:
@@ -152,9 +156,10 @@ class SessionStore:
 
     def delete(self, session_id: str):
         """删除会话及其消息"""
-        self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self._conn.commit()
 
     def list_sessions(self) -> list[dict]:
         """列出所有会话"""
@@ -168,37 +173,39 @@ class SessionStore:
     def add_message(self, session_id: str, message: Message):
         """追加一条消息"""
         now = time.time()
-        self._conn.execute(
-            "INSERT INTO messages(session_id, role, content, timestamp, metadata_json, parent_id, expert_id, branch_id) VALUES(?,?,?,?,?,?,?,?)",
-            (
-                session_id, message.role, message.content,
-                message.timestamp or now,
-                json.dumps(message.metadata, ensure_ascii=False),
-                message.parent_id, message.expert_id, message.branch_id,
-            ),
-        )
-        self._conn.execute(
-            "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO messages(session_id, role, content, timestamp, metadata_json, parent_id, expert_id, branch_id) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    session_id, message.role, message.content,
+                    message.timestamp or now,
+                    json.dumps(message.metadata, ensure_ascii=False),
+                    message.parent_id, message.expert_id, message.branch_id,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
+            )
+            self._conn.commit()
 
     def add_messages(self, session_id: str, messages: list[Message]):
         """批量追加消息"""
         now = time.time()
-        for msg in messages:
+        with self._lock:
+            for msg in messages:
+                self._conn.execute(
+                    "INSERT INTO messages(session_id, role, content, timestamp, metadata_json, parent_id, expert_id, branch_id) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        session_id, msg.role, msg.content,
+                        msg.timestamp or now,
+                        json.dumps(msg.metadata, ensure_ascii=False),
+                        msg.parent_id, msg.expert_id, msg.branch_id,
+                    ),
+                )
             self._conn.execute(
-                "INSERT INTO messages(session_id, role, content, timestamp, metadata_json, parent_id, expert_id, branch_id) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    session_id, msg.role, msg.content,
-                    msg.timestamp or now,
-                    json.dumps(msg.metadata, ensure_ascii=False),
-                    msg.parent_id, msg.expert_id, msg.branch_id,
-                ),
+                "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
             )
-        self._conn.execute(
-            "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
-        )
-        self._conn.commit()
+            self._conn.commit()
 
     def get_messages(self, session_id: str, limit: int = 0) -> list[Message]:
         """获取会话消息（limit=0 表示全部）"""
@@ -208,18 +215,22 @@ class SessionStore:
             rows = self._conn.execute(query, (session_id, limit)).fetchall()
         else:
             rows = self._conn.execute(query, (session_id,)).fetchall()
-        return [
-            Message(
-                role=r["role"],
-                content=r["content"],
-                timestamp=r["timestamp"],
-                metadata=json.loads(r["metadata_json"]),
-                parent_id=r["parent_id"],
-                expert_id=r["expert_id"],
-                branch_id=r["branch_id"],
-            )
-            for r in rows
-        ]
+        return [self._row_to_message(r) for r in rows]
+
+    @staticmethod
+    def _row_to_message(r) -> Message:
+        """将数据库行转为 Message，同时将 DB 自增 ID 存入 metadata['db_id']"""
+        meta = json.loads(r["metadata_json"])
+        meta["db_id"] = r["id"]  # 稳定标识符，用于 get_message_tree
+        return Message(
+            role=r["role"],
+            content=r["content"],
+            timestamp=r["timestamp"],
+            metadata=meta,
+            parent_id=r["parent_id"],
+            expert_id=r["expert_id"],
+            branch_id=r["branch_id"],
+        )
 
     def get_messages_by_branch(self, session_id: str, branch_id: str) -> list[Message]:
         """按分支获取消息（v2 新增）"""
@@ -227,18 +238,7 @@ class SessionStore:
             "SELECT * FROM messages WHERE session_id = ? AND branch_id = ? ORDER BY id ASC",
             (session_id, branch_id),
         ).fetchall()
-        return [
-            Message(
-                role=r["role"],
-                content=r["content"],
-                timestamp=r["timestamp"],
-                metadata=json.loads(r["metadata_json"]),
-                parent_id=r["parent_id"],
-                expert_id=r["expert_id"],
-                branch_id=r["branch_id"],
-            )
-            for r in rows
-        ]
+        return [self._row_to_message(r) for r in rows]
 
     def get_messages_by_expert(self, session_id: str, expert_id: str) -> list[Message]:
         """按专家获取消息（v2 新增）"""
@@ -246,42 +246,28 @@ class SessionStore:
             "SELECT * FROM messages WHERE session_id = ? AND expert_id = ? ORDER BY id ASC",
             (session_id, expert_id),
         ).fetchall()
-        return [
-            Message(
-                role=r["role"],
-                content=r["content"],
-                timestamp=r["timestamp"],
-                metadata=json.loads(r["metadata_json"]),
-                parent_id=r["parent_id"],
-                expert_id=r["expert_id"],
-                branch_id=r["branch_id"],
-            )
-            for r in rows
-        ]
+        return [self._row_to_message(r) for r in rows]
 
     def get_message_tree(self, session_id: str) -> dict:
         """获取树形消息结构（v2 新增）
         Returns:
-            {msg_id: {"msg": Message, "children": [child_ids]}}
+            {db_id: {"msg": Message, "children": [child_db_ids]}}
+            每个消息的 db_id 即其在数据库中的自增主键 id。
         """
         msgs = self.get_messages(session_id)
         tree: dict = {}
+        # 以稳定 db_id 为键建立所有节点
         for m in msgs:
-            # Use metadata to get a stable id, or fallback to index
-            msg_id = m.metadata.get("msg_id", id(m))
-            tree[msg_id] = {"msg": m, "children": []}
+            db_id = m.metadata.get("db_id")
+            if db_id is not None:
+                tree[db_id] = {"msg": m, "children": []}
 
-        # Build parent-child relationships
+        # 构建父子关系：parent_id 指向数据库中的父消息 id
         for m in msgs:
-            if m.parent_id is not None:
-                parent = m.parent_id
-                msg_id = m.metadata.get("msg_id", id(m))
-                # Find parent by checking metadata
-                for pid, node in tree.items():
-                    pmsg = node["msg"]
-                    if pmsg.metadata.get("msg_id") == parent:
-                        node["children"].append(msg_id)
-                        break
+            if m.parent_id is not None and m.parent_id in tree:
+                db_id = m.metadata.get("db_id")
+                if db_id is not None:
+                    tree[m.parent_id]["children"].append(db_id)
 
         return tree
 
@@ -295,11 +281,12 @@ class SessionStore:
 
     def save_state(self, session_id: str, state: dict):
         """保存自定义状态（如当前步骤、中间变量）"""
-        self._conn.execute(
-            "UPDATE sessions SET state_json = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(state, ensure_ascii=False), time.time(), session_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET state_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(state, ensure_ascii=False), time.time(), session_id),
+            )
+            self._conn.commit()
 
     def get_state(self, session_id: str) -> dict:
         """读取自定义状态"""

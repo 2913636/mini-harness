@@ -12,13 +12,27 @@
   6. 结果合成 — 调用 Synthesizer 生成最终报告
 """
 
-import inspect
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .expert import ExpertRegistry, Expert
 from .synthesizer import ResultSynthesizer
+
+
+def _call_with_context(fn: Callable, task: str, context: dict) -> str:
+    """用统一约定调用函数 fn(task, context)，通过 TypeError 降级兼容不同签名。
+
+    约定签名: fn(task: str, context: dict) -> str
+    降级顺序: fn(task, context) → fn(task) → fn()
+    """
+    try:
+        return fn(task, context)
+    except TypeError:
+        try:
+            return fn(task)
+        except TypeError:
+            return fn()
 
 
 @dataclass
@@ -365,10 +379,12 @@ class Orchestrator:
         """
         按 DAG 依赖顺序执行子任务。
 
-        有依赖的子任务，等依赖完成后才执行。
+        有依赖的子任务，等依赖完成后才执行，并将上游结果传入 context。
         没有依赖的子任务可以并行执行。
         """
         completed_ids: set[str] = set()
+        # 收集已完成子任务的结果，供下游专家使用
+        completed_results: dict[str, str] = {}
         iteration = 0
 
         while iteration < max_iterations:
@@ -386,15 +402,24 @@ class Orchestrator:
                 if not deps_ready:
                     continue
 
+                # 构建上下文：包含当前子任务描述 + 依赖子任务的结果
+                context = {"subtask": st.description}
+                if st.dependencies:
+                    context["dependencies"] = {
+                        dep_id: completed_results.get(dep_id, "")
+                        for dep_id in st.dependencies
+                    }
+
                 # 执行子任务
                 st.status = "running"
                 try:
-                    result = self._execute_subtask(st)
+                    result = self._execute_subtask(st, context)
                     st.result = result
                     st.status = "done"
                     completed_ids.add(st.id)
-                except Exception as e:
-                    st.result = f"执行失败：{e}"
+                    completed_results[st.id] = result
+                except Exception:
+                    st.result = "子任务执行失败，已自动降级处理。"
                     st.status = "failed"
 
             if all_done:
@@ -402,24 +427,27 @@ class Orchestrator:
 
         return subtasks
 
-    def _execute_subtask(self, subtask: SubTask) -> str:
-        """执行单个子任务：调用匹配的专家或 LLM 兜底"""
+    def _execute_subtask(self, subtask: SubTask, context: dict | None = None) -> str:
+        """执行单个子任务：调用匹配的专家或 LLM 兜底。
+
+        专家函数统一约定签名 fn(task: str, context: dict) -> str。
+        通过 TypeError 降级兼容不同参数数量的函数，不再使用
+        inspect.signature 做脆弱判断。
+
+        Args:
+            subtask: 要执行的子任务
+            context: 执行上下文，包含 {"subtask": ..., "dependencies": {...}}
+        """
         expert_name = subtask.assigned_expert
+        ctx = context or {"subtask": subtask.description}
 
         if expert_name:
             expert = self.registry.get(expert_name)
+
             if expert and expert.fn:
                 t0 = time.perf_counter()
                 try:
-                    # 构建上下文（包含依赖子任务的结果）
-                    context = {"subtask": subtask.description}
-                    sig = inspect.signature(expert.fn)
-                    if len(sig.parameters) >= 2:
-                        result = expert.fn(subtask.description, context)
-                    elif len(sig.parameters) == 1:
-                        result = expert.fn(subtask.description)
-                    else:
-                        result = expert.fn()
+                    result = _call_with_context(expert.fn, subtask.description, ctx)
                     subtask.source_expert = expert_name
                 except Exception:
                     # 专家执行失败 → LLM 兜底
@@ -430,13 +458,7 @@ class Orchestrator:
             elif expert and expert.llm_fn:
                 t0 = time.perf_counter()
                 try:
-                    sig = inspect.signature(expert.llm_fn)
-                    if len(sig.parameters) >= 2:
-                        result = expert.llm_fn(subtask.description, {})
-                    elif len(sig.parameters) == 1:
-                        result = expert.llm_fn(subtask.description)
-                    else:
-                        result = expert.llm_fn()
+                    result = _call_with_context(expert.llm_fn, subtask.description, ctx)
                     subtask.source_expert = expert_name
                 except Exception:
                     result = self._fallback_llm(subtask)

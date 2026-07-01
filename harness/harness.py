@@ -338,11 +338,11 @@ class AgentHarness:
                         tool_result = str(tool.fn(**validated_args))
                         step.output_summary = tool_result[:200]
                     except ValueError as e:
-                        tool_result = f"参数校验失败：{e}"
-                        step.error = tool_result
+                        step.error = str(e)[:500]
+                        tool_result = "参数校验失败，请检查工具参数格式和必填字段。"
                     except Exception as e:
-                        tool_result = f"工具执行错误：{e}"
-                        step.error = tool_result
+                        step.error = str(e)[:500]
+                        tool_result = "工具执行时发生内部错误，请稍后重试或联系管理员。"
 
             tool_msg = Message(
                 role="tool",
@@ -428,7 +428,7 @@ class AgentHarness:
                 step.error = str(e)[:200]
                 result = {
                     "success": False,
-                    "report": f"编排执行失败：{e}",
+                    "report": "编排执行过程中发生内部错误，请稍后重试。",
                     "subtasks": [],
                     "gaps": [],
                     "stats": {},

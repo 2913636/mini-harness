@@ -8,6 +8,7 @@
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -53,11 +54,13 @@ class Tracer:
     def __init__(self, db_path: str = ":memory:", verbose: bool = True):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
         self.verbose = verbose
         self._init_tables()
 
     def _init_tables(self):
         self._conn.executescript("""
+            PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS traces (
                 step_id TEXT PRIMARY KEY,
                 step_type TEXT NOT NULL,
@@ -150,21 +153,22 @@ class Tracer:
     # ── 写入 / 打印 ─────────────────────
 
     def _write(self, step: TraceStep):
-        self._conn.execute(
-            """INSERT INTO traces(step_id, step_type, session_id, input_summary,
-               output_summary, token_used, duration_ms, error, metadata_json, timestamp,
-               expert_id, parent_step_id)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                step.step_id, step.step_type, step.session_id,
-                step.input_summary[:500], step.output_summary[:500],
-                step.token_used, step.duration_ms, step.error,
-                json.dumps(step.metadata, ensure_ascii=False),
-                step.timestamp,
-                step.expert_id, step.parent_step_id,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO traces(step_id, step_type, session_id, input_summary,
+                   output_summary, token_used, duration_ms, error, metadata_json, timestamp,
+                   expert_id, parent_step_id)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    step.step_id, step.step_type, step.session_id,
+                    step.input_summary[:500], step.output_summary[:500],
+                    step.token_used, step.duration_ms, step.error,
+                    json.dumps(step.metadata, ensure_ascii=False),
+                    step.timestamp,
+                    step.expert_id, step.parent_step_id,
+                ),
+            )
+            self._conn.commit()
 
     # 敏感数据模式：匹配这些模式的值将自动脱敏
     _SENSITIVE_PATTERNS = [
@@ -174,15 +178,27 @@ class Tracer:
 
     @classmethod
     def _redact_sensitive(cls, text: str) -> str:
-        """对可能包含敏感数据的摘要文本进行脱敏"""
+        """对可能包含敏感数据的摘要文本进行脱敏。
+
+        覆盖模式：
+          - key=value / key: value （明文配置）
+          - "key": "value" / "key": value （JSON 格式）
+        """
         if not text:
             return text
         import re
         for pattern in cls._SENSITIVE_PATTERNS:
-            # 匹配 key=value 或 "key": "value" 或 key: value 模式
+            # 模式 1: key=value 或 key: value（无引号/明文格式）
             text = re.sub(
                 rf'({pattern}\s*[=:]\s*)(\S+)',
                 r'\1[REDACTED]',
+                text,
+                flags=re.IGNORECASE,
+            )
+            # 模式 2: "key": "value" 或 "key": value（JSON 格式）
+            text = re.sub(
+                rf'(["\']({pattern})["\']\s*:\s*)(["\']?)([^"\'\,\s\}}]+)(\3)',
+                r'\1\3[REDACTED]\5',
                 text,
                 flags=re.IGNORECASE,
             )

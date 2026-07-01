@@ -12,6 +12,8 @@ mini-harness 演示：六大组件协同工作的完整流程
     py demo.py
 """
 
+import ast
+import operator
 import os
 import sys
 
@@ -19,6 +21,55 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from harness import AgentHarness, Message
+
+
+# ── 安全的数学表达式求值器 ──────────
+# 仅支持数字、四则运算、幂运算、括号，禁止所有函数调用和属性访问
+
+_SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval(node):
+    """递归求值 AST 节点，只允许安全操作"""
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body)
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.BinOp):
+        left = _safe_eval(node.left)
+        right = _safe_eval(node.right)
+        op_type = type(node.op)
+        if op_type in _SAFE_OPS:
+            return _SAFE_OPS[op_type](left, right)
+        raise ValueError(f"不允许的操作符: {op_type.__name__}")
+    if isinstance(node, ast.UnaryOp):
+        operand = _safe_eval(node.operand)
+        op_type = type(node.op)
+        if op_type in _SAFE_OPS:
+            return _SAFE_OPS[op_type](operand)
+        raise ValueError(f"不允许的一元操作符: {op_type.__name__}")
+    raise ValueError(f"不支持的表达式类型: {type(node).__name__}")
+
+
+def safe_calculate(expression: str) -> float:
+    """安全计算数学表达式。仅支持 + - * / ** 和括号，拒绝所有其他操作。"""
+    # 基本净化检查：拒绝包含字母、下划线、属性访问的输入
+    sanitized = expression.strip()
+    if not sanitized:
+        raise ValueError("空表达式")
+    # 拒绝明显危险的模式
+    if any(c.isalpha() or c == '_' for c in sanitized):
+        raise ValueError("表达式包含非法字符（仅支持数字和运算符）")
+    tree = ast.parse(sanitized, mode='eval')
+    return _safe_eval(tree)
 
 
 # ═══════════════════════════════════════
@@ -98,7 +149,7 @@ def mock_summarize(messages: list[Message]) -> str:
 def tool_calculator(expression: str) -> str:
     """安全计算器"""
     try:
-        result = eval(expression, {"__builtins__": {}})  # 沙箱
+        result = safe_calculate(expression)
         return f"计算结果: {expression} = {result}"
     except Exception as e:
         return f"计算错误: {e}"
